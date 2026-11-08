@@ -76,6 +76,9 @@ let myBotId: bigint | null = null;
 const bidsByAuction = new Set<string>();
 // Auctions seen per match, used to pace bidding (see strategy.ts).
 const auctionsSeenByMatch = new Map<string, number>();
+// Timer that retries word plays; cleared on disconnect, restarted on
+// (re)connect. See bootstrapActivity.
+let wordPlayTimer: ReturnType<typeof setInterval> | null = null;
 const lastWordAttemptByMatch = new Map<string, number>();
 const WORD_RETRY_MS = 500;
 
@@ -317,6 +320,16 @@ function bootstrapActivity(conn: DbConnection) {
     }
   }
   tryPlayWord(conn);
+
+  // Keep trying to play: rack-change events alone can leave the bot sitting
+  // on a playable word -- an attempt swallowed by the 500 ms throttle has
+  // no retry, and the next rack change may be several auctions away. A
+  // 500 ms heartbeat guarantees a fresh attempt every half second; the
+  // throttle in tryPlayWord still caps submissions at one per 500 ms per
+  // match, so this cannot spam the server.
+  if (wordPlayTimer === null) {
+    wordPlayTimer = setInterval(() => tryPlayWord(conn), WORD_RETRY_MS);
+  }
 }
 
 function main() {
@@ -329,7 +342,13 @@ function main() {
     .onConnectError((_ctx: ErrorContext, err: Error) =>
       console.error("connect error:", err.message),
     )
-    .onDisconnect(() => console.log("disconnected"))
+    .onDisconnect(() => {
+      console.log("disconnected");
+      if (wordPlayTimer !== null) {
+        clearInterval(wordPlayTimer);
+        wordPlayTimer = null;
+      }
+    })
     .build();
 }
 

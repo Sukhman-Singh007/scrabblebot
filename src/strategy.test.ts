@@ -12,9 +12,10 @@ const rack = (letters: string) => {
 };
 
 test("chooseWord picks the longest word the rack can spell", () => {
-  const dictionary = ["TACT", "CAT", "AT"];
-  assert.equal(chooseWord({ myRack: rack("TACT"), dictionary }), "TACT");
-  assert.equal(chooseWord({ myRack: rack("CATX"), dictionary }), "CAT");
+  // Words here clear the small-word hold (>= 25 pts); see the hold test.
+  const dictionary = ["JAZZY", "JAZZ", "JAZ"];
+  assert.equal(chooseWord({ myRack: rack("JAZZY"), dictionary }), "JAZZY");
+  assert.equal(chooseWord({ myRack: rack("JAZZX"), dictionary }), "JAZZ");
   assert.equal(chooseWord({ myRack: rack("CX"), dictionary }), null);
 });
 
@@ -79,9 +80,9 @@ test("decideBid does not overpay for duplicate letters", () => {
     myBalance: 100,
     myRack: rack("JKZZZ"),
   });
-  assert.equal(fresh, 10, "first Z should be worth its face value");
+  assert.equal(fresh, 14, "first Z should be worth the 14-coin floor (face 10)");
   assert.ok(thirdCopy < fresh, "a 3rd copy should be worth much less");
-  assert.ok(thirdCopy <= 6, `3rd Z should be cheap, got ${thirdCopy}`);
+  assert.ok(thirdCopy <= 8, `3rd Z should be cheap, got ${thirdCopy}`);
   assert.equal(fourthCopy, 0, "a 4th copy that completes nothing is worthless");
 });
 
@@ -97,10 +98,10 @@ test("decideBid keeps a reserve and paces spending", () => {
     0,
     "with 4 coins, don't spend on a letter that completes nothing",
   );
-  // Same letter with a healthy balance bids face value.
+  // Same letter with a healthy balance bids the 14-coin floor (face 10).
   assert.equal(
     decideBid({ letter: "Z", myBalance: 100, myRack: rack("JK") }),
-    10,
+    14,
   );
   // Big completion, small balance: capped at 50% of balance early (10 of
   // 20), even though T completing QUIET/QUITE from QUIE is worth ~38.
@@ -171,16 +172,45 @@ test("chooseWord holds for a much better one-letter-away word, but not for a sma
     chooseWord({ myRack: rack("QUIZ"), dictionary: ["QI", "QUIZ"] }),
     "QUIZ",
   );
-  // CAT (5) now vs CATS (9) one S away: the gain is too small to wait.
+  // JAZZ (43) now vs JAZZY (66) one Y away: the gain is 23 but only
+  // 1.5x, under the 3x bar, so play now. (CAT/BED-style small words are
+  // now held by the small-word hold instead -- see the test below.)
+  assert.equal(
+    chooseWord({ myRack: rack("JAZZ"), dictionary: ["JAZZ", "JAZZY"] }),
+    "JAZZ",
+  );
+});
+
+// Small words are held while the rack is small: a 2-point word is not
+// worth spending tiles on when those tiles drive both bidding and future
+// bigger words. The hold lifts once the rack is big or the match is late.
+test("chooseWord holds small words while the rack is small", () => {
+  // CAT (7) and BED (6) are held early with a small rack.
   assert.equal(
     chooseWord({ myRack: rack("CAT"), dictionary: ["CAT", "CATS"] }),
-    "CAT",
+    null,
   );
-  // BED (6) now vs BEDZ (24) one Z away: v1 held here (18 more, 4x), but
-  // the gain is under the v2 bar of 20, so play now.
   assert.equal(
     chooseWord({ myRack: rack("BED"), dictionary: ["BED", "BEDZ"] }),
-    "BED",
+    null,
+  );
+  // Same small word with a big rack (>= 9 tiles): play it, the tiles
+  // are not scarce.
+  assert.equal(
+    chooseWord({
+      myRack: rack("CATABCDEF"),
+      dictionary: ["CAT", "CATS"],
+    }),
+    "CAT",
+  );
+  // Same small word late in the match (60 of 68 auctions): cash out.
+  assert.equal(
+    chooseWord({
+      myRack: rack("CAT"),
+      dictionary: ["CAT", "CATS"],
+      auctionsSeen: 60,
+    }),
+    "CAT",
   );
 });
 

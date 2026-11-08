@@ -81,7 +81,7 @@ test("decideBid does not overpay for duplicate letters", () => {
   });
   assert.equal(fresh, 10, "first Z should be worth its face value");
   assert.ok(thirdCopy < fresh, "a 3rd copy should be worth much less");
-  assert.ok(thirdCopy <= 3, `3rd Z should be cheap, got ${thirdCopy}`);
+  assert.ok(thirdCopy <= 6, `3rd Z should be cheap, got ${thirdCopy}`);
   assert.equal(fourthCopy, 0, "a 4th copy that completes nothing is worthless");
 });
 
@@ -102,12 +102,39 @@ test("decideBid keeps a reserve and paces spending", () => {
     decideBid({ letter: "Z", myBalance: 100, myRack: rack("JK") }),
     10,
   );
-  // Big completion, small balance: capped at 35% of balance (7 of 20),
-  // even though T completing QUIET/QUITE from QUIE is worth ~17.
+  // Big completion, small balance: capped at 50% of balance early (10 of
+  // 20), even though T completing QUIET/QUITE from QUIE is worth ~38.
   assert.equal(
     decideBid({ letter: "T", myBalance: 20, myRack: rack("QUIE") }),
-    7,
+    10,
   );
+});
+
+test("decideBid spends the whole balance late in the match", () => {
+  // Same T completing QUIET/QUITE from QUIE, balance 20. Early it bids 10;
+  // mid-match (40 auctions seen) it bids 15; late (70 seen) it bids all 20,
+  // because coins left when the bag empties are worth nothing.
+  const early = decideBid({
+    letter: "T",
+    myBalance: 20,
+    myRack: rack("QUIE"),
+    auctionsSeen: 0,
+  });
+  const mid = decideBid({
+    letter: "T",
+    myBalance: 20,
+    myRack: rack("QUIE"),
+    auctionsSeen: 40,
+  });
+  const late = decideBid({
+    letter: "T",
+    myBalance: 20,
+    myRack: rack("QUIE"),
+    auctionsSeen: 70,
+  });
+  assert.equal(early, 10);
+  assert.equal(mid, 15);
+  assert.equal(late, 20);
 });
 
 test("chooseWord picks the highest-scoring word, not merely the longest", () => {
@@ -148,5 +175,24 @@ test("chooseWord holds for a much better one-letter-away word, but not for a sma
   assert.equal(
     chooseWord({ myRack: rack("CAT"), dictionary: ["CAT", "CATS"] }),
     "CAT",
+  );
+  // BED (6) now vs BEDZ (24) one Z away: v1 held here (18 more, 4x), but
+  // the gain is under the v2 bar of 20, so play now.
+  assert.equal(
+    chooseWord({ myRack: rack("BED"), dictionary: ["BED", "BEDZ"] }),
+    "BED",
+  );
+});
+
+test("chooseWord never holds late in the match", () => {
+  // QI vs QUIZ is a hold early, but with 60 auctions seen the match is
+  // nearly over -- play the QI now.
+  assert.equal(
+    chooseWord({
+      myRack: rack("QUI"),
+      dictionary: ["QI", "QUIZ"],
+      auctionsSeen: 60,
+    }),
+    "QI",
   );
 });

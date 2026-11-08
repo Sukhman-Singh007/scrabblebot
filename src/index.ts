@@ -74,6 +74,8 @@ DICTIONARY.sort((a, b) => b.length - a.length); // longest first for greedy pick
 let myIdentity: Identity | null = null;
 let myBotId: bigint | null = null;
 const bidsByAuction = new Set<string>();
+// Auctions seen per match, used to pace bidding (see strategy.ts).
+const auctionsSeenByMatch = new Map<string, number>();
 const lastWordAttemptByMatch = new Map<string, number>();
 const WORD_RETRY_MS = 500;
 
@@ -124,6 +126,7 @@ function tryBid(
   auctionId: bigint,
   matchId: bigint,
   letter: string,
+  auctionsSeen: number,
 ) {
   if (myBotId === null) return;
   const key = `${matchId}:${auctionId}`;
@@ -134,6 +137,7 @@ function tryBid(
     letter,
     myBalance: participant.balance,
     myRack: rackForMatch(conn, matchId),
+    auctionsSeen,
   });
   if (amount <= 0) return;
   conn.reducers
@@ -163,6 +167,7 @@ function tryPlayWord(conn: DbConnection) {
     const word = chooseWord({
       myRack: rackForMatch(conn, matchId),
       dictionary: DICTIONARY,
+      auctionsSeen: auctionsSeenByMatch.get(key) ?? 0,
     });
     if (!word) continue;
     console.log(`[${BOT_NAME}] match ${matchId}: playing '${word}'`);
@@ -218,12 +223,25 @@ function onConnect(conn: DbConnection, identity: Identity, token: string) {
       console.log(
         `[${BOT_NAME}] acting as bot '${bot?.name ?? "?"}' (id ${myBotId})`,
       );
+      // The subscriptions below are hard-coded for bot 219 (Sigma). If
+      // this id ever changes (new bot version / credential), update the
+      // bot_id in the subscribe() queries or the bot will stop seeing
+      // auctions.
+      if (myBotId !== BigInt(219)) {
+        console.error(
+          `[${BOT_NAME}] WARNING: subscriptions filter bot_id = 219 but this bot is ${myBotId} — update the bot_id in subscribe() or auctions will not arrive.`,
+        );
+      }
       bootstrapActivity(conn);
     })
-    .subscribeToAllTables();
+    .subscribe(["SELECT * FROM bot","SELECT * FROM bot_credential","SELECT * FROM my_rack","SELECT * FROM lobby","SELECT * FROM lobby_member","SELECT * FROM match_participant WHERE bot_id = 219","SELECT match_state.* FROM match_state JOIN match_participant ON match_state.id = match_participant.match_id WHERE match_participant.bot_id = 219","SELECT auction.* FROM auction JOIN match_participant ON auction.match_id = match_participant.match_id WHERE match_participant.bot_id = 219"]);
 
   conn.db.auction.onInsert((_ctx: EventContext, a) => {
-    if (a.status.tag === "Open") tryBid(conn, a.id, a.matchId, a.letter);
+    if (a.status.tag !== "Open") return;
+    const key = String(a.matchId);
+    const seen = (auctionsSeenByMatch.get(key) ?? 0) + 1;
+    auctionsSeenByMatch.set(key, seen);
+    tryBid(conn, a.id, a.matchId, a.letter, seen);
   });
   conn.db.myRack.onInsert(() => tryPlayWord(conn));
   conn.db.myRack.onUpdate(() => tryPlayWord(conn));
@@ -288,7 +306,15 @@ function bootstrapActivity(conn: DbConnection) {
   }
   joinLobby(conn);
   for (const a of conn.db.auction.iter()) {
-    if (a.status.tag === "Open") tryBid(conn, a.id, a.matchId, a.letter);
+    if (a.status.tag === "Open") {
+      tryBid(
+        conn,
+        a.id,
+        a.matchId,
+        a.letter,
+        auctionsSeenByMatch.get(String(a.matchId)) ?? 0,
+      );
+    }
   }
   tryPlayWord(conn);
 }

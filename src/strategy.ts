@@ -13,22 +13,26 @@
 // letters we actually wanted.
 //
 // decideBid values a letter as:
-//   face value
-//   + half the score of the best word it completes (a word the rack alone
+//   a floor (at least 6 with a healthy balance, at least 3 otherwise)
+//   + the FULL score of the best word it completes (a word the rack alone
 //     cannot spell), from a built-in list of short words taken from the
-//     shared wordlist
+//     shared wordlist -- under Vickrey you pay the runner-up's bid, so the
+//     full value is the right bid
 //   + a small bonus when it completes three or more words (versatile letter)
-//   x a duplicate factor (1 / 0.6 / 0.35 / 0 for the 1st / 2nd / 3rd / 4th+
-//     copy already held)
-//   then capped by budget pacing: keep a reserve, never spend more than 35%
-//   of the balance on one letter, and with a tiny balance only bid on a
-//   letter that completes a word.
+//   x a softened duplicate factor (1 / 0.8 / 0.6 / 0.3-or-0 for the 1st /
+//     2nd / 3rd / 4th+ copy already held)
+//   then paced by match progress (auctions seen so far): the reserve
+//   shrinks to 0 and the per-bid cap grows to the whole balance late in
+//   the match, because coins left over when the bag empties are worth
+//   nothing. With a tiny balance it only bids on a letter that completes
+//   a word.
 //
 // chooseWord scans the whole dictionary and plays the highest-scoring word
-// it can spell (not just the longest). It only holds back when the best
-// playable word is small (<= 15) and the rack is one letter away from a word
-// worth at least 15 more and 2.5x as much -- then it waits one auction for
-// that letter instead of cashing in the small word now.
+// it can spell (not just the longest). It holds back only in the rare case
+// where the best word is small (<= 12), a one-letter-away word is worth at
+// least 20 more and 3x as much, and the match is less than half over --
+// waiting costs a whole auction of rack turnover, and the awaited letter
+// may go to a rival or never appear.
 //
 // Both functions are O(dictionary) with cheap per-word early exits and no
 // allocation in the hot loop, so a full search stays well inside the
@@ -45,11 +49,15 @@ export interface BidContext {
   letter: string;        // Letter being auctioned, e.g. "Q"
   myBalance: number;     // Current balance
   myRack: Map<string, number>; // Letters you currently own, letter -> count
+  /** Auctions seen in this match so far; paces spending. Omitted = 0. */
+  auctionsSeen?: number;
 }
 
 export interface WordContext {
   myRack: Map<string, number>;
   dictionary: string[]; // Sorted uppercase list, shared at startup
+  /** Auctions seen in this match so far; disables holding late. Omitted = 0. */
+  auctionsSeen?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -924,11 +932,20 @@ ZONE ZONED ZONER ZONES ZONK ZONKS ZOO ZOOID ZOOKS ZOOM ZOOMS ZOON ZOONS ZOOS ZOO
 ZOWIE ZYME ZYMES
 `.trim().split(/\s+/);
 
+// A standard Scrabble bag holds 100 tiles and each bot starts with 5, so a
+// 4-bot table runs about 80 auctions. Progress paces spending (see decideBid).
+const ESTIMATED_ROUNDS = 80;
+
+function matchProgress(auctionsSeen: number | undefined): number {
+  return Math.min(1, Math.max(0, (auctionsSeen ?? 0) / ESTIMATED_ROUNDS));
+}
+
 /**
  * Decide how much to bid for `letter`. Return 0 to skip.
  * Bids the letter's true value (optimal under the default Vickrey auction):
- * face value + completion premium, discounted for duplicates, capped by
- * budget pacing.
+ * floor + full completion value, discounted for duplicates, paced by match
+ * progress -- the reserve shrinks and the cap grows as the bag empties,
+ * because unspent coins are worth nothing at the end of a match.
  */
 export function decideBid(ctx: BidContext): number {
   const balance = Math.max(0, Math.floor(ctx.myBalance));
@@ -957,27 +974,39 @@ export function decideBid(ctx: BidContext): number {
     const s = scoreWord(word);
     if (s > bestCompletion) bestCompletion = s;
   }
-  const completionPremium = 0.5 * bestCompletion;
+  // Under Vickrey you pay the runner-up's bid, so bid the letter's full
+  // value: the completed word's score is what the letter is really worth.
+  const completionPremium = bestCompletion;
   const versatilityBonus = completions >= 3 ? 2 : 0;
 
-  let value = face + completionPremium + versatilityBonus;
+  // Local floor (kept): never value a letter below 6 with a healthy
+  // balance, or below 3 otherwise -- cheap letters are still worth buying.
+  let value = Math.max(face, balance >= 40 ? 6 : 3) + completionPremium + versatilityBonus;
 
-  // (c) Duplicates / scarcity: each copy already held makes the next one
-  // much less useful. A 4th+ copy is worthless unless it completes a word.
+  // (c) Duplicates / scarcity, softened: a 2nd copy of a useful letter is
+  // still quite useful. Only a 4th+ copy is near-worthless unless it
+  // completes a word.
   let dupFactor: number;
   if (have === 0) dupFactor = 1;
-  else if (have === 1) dupFactor = 0.6;
-  else if (have === 2) dupFactor = 0.35;
-  else dupFactor = bestCompletion > 0 ? 0.15 : 0;
+  else if (have === 1) dupFactor = 0.8;
+  else if (have === 2) dupFactor = 0.6;
+  else dupFactor = bestCompletion > 0 ? 0.3 : 0;
   value *= dupFactor;
 
-  // (d) Budget pacing: keep a reserve and never blow a big share of the
-  // balance on one letter early. With a tiny balance, only spend on a
-  // letter that completes a word.
+  // (d) Budget pacing by match progress. Coins left when the bag empties
+  // are worth nothing, so the reserve shrinks to 0 and the per-bid cap
+  // grows to the whole balance late in the match. With a tiny balance,
+  // only spend on a letter that completes a word.
   if (balance <= 5 && bestCompletion === 0) return 0;
+  const progress = matchProgress(ctx.auctionsSeen);
   const reserve =
-    balance < 10 ? 0 : Math.min(25, Math.max(5, Math.floor(balance * 0.15)));
-  const perBidCap = Math.max(3, Math.floor(balance * 0.35));
+    progress >= 0.6
+      ? 0
+      : progress >= 0.25
+        ? 5
+        : Math.min(15, Math.max(5, Math.floor(balance * 0.1)));
+  const capFraction = progress >= 0.6 ? 1 : progress >= 0.25 ? 0.75 : 0.5;
+  const perBidCap = Math.max(3, Math.floor(balance * capFraction));
   const bid = Math.min(Math.floor(value), balance - reserve, perBidCap);
   return Math.max(0, bid);
 }
@@ -1020,11 +1049,12 @@ export function chooseWord(ctx: WordContext): string | null {
   }
   if (best === null) return null;
 
-  // Hold out only when the rack is one letter away from something much
-  // better: the best playable word is small and a one-letter-away word is
-  // worth at least 15 more and 2.5x as much. Otherwise play now -- a bird
-  // in the hand beats a hypothetical bigger word.
-  if (bestScore <= 15) {
+  // Hold out only in the rare case where the rack is one letter away from
+  // something far better -- and never late in the match, when few auctions
+  // remain to deliver that letter. Waiting costs a whole auction of rack
+  // turnover, and the awaited letter may go to a rival or never appear.
+  const progress = matchProgress(ctx.auctionsSeen);
+  if (bestScore <= 12 && progress < 0.5) {
     let bestOneAway = 0;
     for (const word of ctx.dictionary) {
       if (word.length < 2 || word.length > tiles + 1) continue;
@@ -1032,7 +1062,7 @@ export function chooseWord(ctx: WordContext): string | null {
       const s = scoreWord(word);
       if (s > bestOneAway) bestOneAway = s;
     }
-    if (bestOneAway - bestScore >= 15 && bestOneAway >= 2.5 * bestScore) {
+    if (bestOneAway - bestScore >= 20 && bestOneAway >= 3 * bestScore) {
       return null;
     }
   }
